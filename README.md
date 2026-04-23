@@ -2,6 +2,10 @@
 
 A **persistent / functional** hash map for [Motoko](https://internetcomputer.org/docs/current/motoko/main/about-this-guide), built on the **CHAMP** (Compressed Hash-Array Mapped Prefix-tree) data structure.
 
+## Funded by ICDevs.org
+
+This library was funded by ICDevs.org - a 501c3 non-profit. If you use it in production, please consider making a donation at https://g53ex-oqaaa-aaaab-ae5ua-cai.icp0.io/#/mint or https://icdevs.org/donation.html.
+
 ## Why this library exists
 
 ChampMap was built because [`ZhenyaUsenko/motoko-hash-map`](https://github.com/ZhenyaUsenko/motoko-hash-map) v9 — the de facto Motoko hash map for years — tops out around **4 million records** and then can no longer grow within the IC's per-message cycle limit. Once a `mo:map` instance crosses that threshold, the rehash/resize step on the next insert exceeds the instruction budget and the canister traps, with no safe path to recover other than offloading entries.
