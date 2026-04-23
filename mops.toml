@@ -2,7 +2,7 @@
 name = "champ-map"
 version = "0.1.0"
 description = "Persistent/functional CHAMP (Compressed Hash-Array Mapped Prefix-tree) map for Motoko"
-repository = ""https://github.com/icdevsorg/champ-map.mo
+repository = "https://github.com/icdevsorg/champ-map.mo"
 license = "MIT"
 
 [dependencies]

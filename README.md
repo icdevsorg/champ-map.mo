@@ -162,6 +162,7 @@ type Map<K, V>    = { #empty; #arrayMap : [var (K, V)]; #trie : Node<K, V> };
 | `equal` | `<K, V>(self, other, hashUtils, veq) : Bool` | Structural equality |
 | `toText` | `<K, V>(map, keyFmt, valFmt) : Text` | Debug string (capped at 1000 entries) |
 | `toTextLimit` | `<K, V>(map, keyFmt, valFmt, limit) : Text` | Debug string with explicit entry cap |
+| `validate` | `<K, V>(map, hashUtils) : {#ok; #err : Text}` | Verify structural invariants — use at trust boundaries (see [Security considerations](#security-considerations)) |
 
 ---
 
@@ -182,14 +183,57 @@ Ready-made `HashUtils` for common key types:
 ### Combinators
 
 ```motoko
-// Composite keys
+// Composite keys (uses an xxHash-style mixer — see Security considerations)
 let pairHash = CM.combineHash(CM.nhash, CM.thash); // HashUtils<(Nat, Text)>
 
-// Override hash for a single lookup
-let fixedHash = CM.useHash(CM.nhash, 42);
+// Per-instance seeded hashing — defeats hash-flooding when keys come from
+// untrusted callers. Use one fresh seed per map.
+let seeded = CM.withSeed<Nat>(myRandomSeed, CM.nhash);
 
-// Pre-compute hash
+// UNSAFE: returns a HashUtils whose getHash always returns the given value.
+// Only valid for batched operations on one specific key whose hash you have
+// already computed. NEVER use as a general HashUtils — every key would land
+// in one bucket.
+let fixedHash = CM.useHash(CM.nhash, 42);
 let precomputed = CM.calcHash(CM.nhash, myKey);
+```
+
+---
+
+## Security considerations
+
+ChampMap is **not safe by default against adversarial keys**. If your keys come from untrusted callers (principals, user-supplied text, opaque blobs from a public method, composite keys involving any of the above), an attacker who knows the hash function can pre-compute keys that all collide into a single bucket. Lookups against a polluted map degrade from `O(1)` to `O(N)` and a single fat bucket can blow the IC's per-message instruction budget. This applies to every hash map, not just this one.
+
+### Threats and mitigations
+
+| Threat | Mitigation |
+|--------|------------|
+| **Hash-flooding** — attacker submits keys with the same `Nat32` hash, forcing all entries into one `#collision` bucket. | Wrap your `HashUtils` with `withSeed<K>(seed, hashUtils)` and pick a fresh per-instance `seed` (canister-local randomness, secret nonce, etc.) so the attacker cannot pre-compute collisions. Honest workloads pay nothing. |
+| **Composite-key collisions via `combineHash`** — the previous `+%` combiner allowed `(a,b)` and `(b,a)` to share a hash trivially. | Already fixed: `combineHash` uses an xxHash-style mixer (multiply‐rotate‐multiply‐xor). Combine with `withSeed` if either component is attacker-controlled. |
+| **Malformed `Map<K, V>` shape** — because `Map<K, V>` is a public structural type, a candid caller can synthesise a `#arrayMap` with > 16 entries, duplicate keys, or a `#branch` whose bitmaps disagree with its arrays. Such values will misbehave or trap on subsequent operations. | **Never accept `Map<K, V>` directly across a trust boundary.** Round-trip via `[(K, V)]` + `fromIter`. If you must accept it, call `validate(map, hashUtils)` first and reject `#err`. |
+| **`useHash` / `calcHash` misuse** — these helpers return a `HashUtils` whose `getHash` ignores its key argument. Threading one into a general put/get path collapses every key into one bucket. | These are intended only for short, batched operations where the caller has already computed the hash for one specific key. Never store one as the canonical `HashUtils` for a map. |
+| **Unbounded mass operations** — `fromIter`, `forEach`, `filter`, `mapFilter`, `map_`, `equal` iterate without a cycle ceiling. Untrusted iterators can blow the per-message instruction budget. | Use `entries` + `collectBatch` to chunk processing. The header comment in `lib.mo` documents safe size estimates per operation. |
+
+### Recommended pattern at trust boundaries
+
+```motoko
+// Accept entries as a flat array, NOT as a Map<K, V> shape.
+public func ingest(entries : [(Principal, Nat)]) : async () {
+  let seeded = CM.withSeed<Principal>(perCanisterSeed, CM.phash);
+  let m = CM.fromIter<Principal, Nat>(entries.vals(), seeded);
+  // ... store m, persist seed alongside it ...
+};
+```
+
+If you absolutely must accept a `Map<K, V>` directly:
+
+```motoko
+public func acceptMap(m : CM.Map<Principal, Nat>) : async {#ok; #err : Text} {
+  switch (CM.validate<Principal, Nat>(m, CM.phash)) {
+    case (#ok)       { /* ... safe to use ... */ #ok };
+    case (#err msg)  { #err msg };
+  };
+};
 ```
 
 ---
@@ -202,23 +246,23 @@ Measured with `mops bench --replica pocket-ic` comparing **ChampMap** (CHAMP tri
 
 |         |  CM 10 |  CM 100 |  CM 1_000 |  CM 10_000 |  CM 100_000 | Core 10 | Core 100 | Core 1_000 | Core 10_000 | Core 100_000 |
 | :------ | -----: | ------: | --------: | ---------: | ----------: | ------: | -------: | ---------: | ----------: | -----------: |
-| build   | 16_810 | 301_782 | 4_866_867 | 70_050_432 | 892_571_108 |  21_993 |  252_138 |  3_668_875 |  48_896_665 |  614_444_993 |
-| get     | 11_854 |  67_104 |   711_390 |  8_038_637 |  93_037_014 |  13_662 |   82_978 |  1_097_791 |  13_959_723 |  171_067_014 |
-| replace | 21_677 | 371_711 | 5_171_931 | 76_947_532 | 984_444_182 |  21_622 |  198_740 |  2_727_802 |  34_556_080 |  421_503_075 |
-| delete  | 14_827 | 313_178 | 5_145_518 | 73_488_944 | 938_023_910 |  20_660 |  210_178 |  2_952_110 |  39_215_479 |  498_705_967 |
+| build   | 16_810 | 304_581 | 4_893_243 | 70_279_391 | 895_007_083 |  21_993 |  252_138 |  3_668_998 |  48_896_255 |  614_443_107 |
+| get     | 11_854 |  68_927 |   728_112 |  8_193_022 |  94_537_253 |  13_662 |   82_978 |  1_097_791 |  13_959_723 |  171_067_014 |
+| replace | 21_677 | 374_501 | 5_197_306 | 77_182_490 | 986_744_481 |  21_622 |  198_699 |  2_727_884 |  34_556_080 |  421_502_132 |
+| delete  | 15_735 | 324_469 | 5_278_537 | 75_055_566 | 955_605_822 |  20_660 |  210_178 |  2_952_069 |  39_215_315 |  498_707_689 |
 | clone   |  6_056 |   8_001 |     8_658 |      7_372 |       5_840 |   9_573 |   10_625 |     10_082 |       8_384 |        6_419 |
-| iterate |  7_760 |  44_250 |   337_697 |  3_013_681 |  32_655_520 |  17_458 |   85_998 |    760_337 |   7_509_348 |   75_013_644 |
+| iterate |  7_760 |  43_354 |   336_760 |  3_012_785 |  32_653_668 |  17_458 |   85_957 |    760_337 |   7_509_307 |   75_013_644 |
 
 ### Garbage collection (allocation pressure)
 
 |         |    CM 10 |    CM 100 |   CM 1_000 |  CM 10_000 | CM 100_000 |  Core 10 |  Core 100 | Core 1_000 | Core 10_000 | Core 100_000 |
 | :------ | -------: | --------: | ---------: | ---------: | ---------: | -------: | --------: | ---------: | ----------: | -----------: |
-| build   | 1.61 KiB | 21.16 KiB | 309.93 KiB |   4.13 MiB |  51.82 MiB |  4.9 KiB | 55.14 KiB | 763.37 KiB |    9.65 MiB |   118.76 MiB |
-| get     | 1.04 KiB |  1.27 KiB |   2.73 KiB |  17.26 KiB | 201.09 KiB | 1.75 KiB |  1.61 KiB |   1.32 KiB |    1.04 KiB |        772 B |
-| replace | 1.78 KiB | 24.38 KiB | 319.52 KiB |    4.4 MiB |  55.57 MiB | 4.39 KiB | 41.93 KiB | 573.46 KiB |    7.26 MiB |    88.29 MiB |
-| delete  | 1.39 KiB | 18.21 KiB |  281.8 KiB |   3.87 MiB |  49.22 MiB | 4.51 KiB | 54.41 KiB | 799.52 KiB |   10.52 MiB |   134.95 MiB |
+| build   | 1.61 KiB | 22.16 KiB |  319.6 KiB |   4.22 MiB |   52.7 MiB |  4.9 KiB | 55.14 KiB | 763.37 KiB |    9.65 MiB |   118.76 MiB |
+| get     | 1.04 KiB |  2.16 KiB |  11.08 KiB |  95.78 KiB |  984.2 KiB | 1.75 KiB |  1.61 KiB |   1.32 KiB |    1.04 KiB |        772 B |
+| replace | 1.78 KiB | 25.71 KiB | 332.04 KiB |   4.52 MiB |  56.71 MiB | 4.39 KiB | 41.93 KiB | 573.46 KiB |    7.26 MiB |    88.29 MiB |
+| delete  | 1.55 KiB | 22.81 KiB | 336.38 KiB |   4.52 MiB |  56.58 MiB | 4.51 KiB | 54.41 KiB | 799.52 KiB |   10.52 MiB |   134.95 MiB |
 | clone   | 1.04 KiB |  1.19 KiB |   1.19 KiB |      924 B |      632 B | 1.75 KiB |  1.61 KiB |   1.32 KiB |    1.04 KiB |        772 B |
-| iterate | 1.09 KiB |  3.94 KiB |     18 KiB | 158.34 KiB |   1.53 MiB | 2.79 KiB | 11.45 KiB |  99.05 KiB |  977.67 KiB |     9.54 MiB |
+| iterate | 1.09 KiB |  3.69 KiB |  17.75 KiB | 158.09 KiB |   1.53 MiB | 2.79 KiB | 11.45 KiB |  99.05 KiB |  977.67 KiB |     9.54 MiB |
 
 ### Key takeaways
 

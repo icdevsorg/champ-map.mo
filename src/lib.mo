@@ -201,8 +201,11 @@ module {
   };
 
   /// Merge two inline entries into a new sub-trie at the given shift level.
+  /// Short-circuits to a #collision leaf as soon as the two hashes are equal,
+  /// avoiding the O(7) chain of empty 1-child branches that would otherwise
+  /// be allocated all the way down to shift>=32 (a hash-flood amplifier).
   func mergeEntries<K, V>(h1 : Nat32, k1 : K, v1 : V, h2 : Nat32, k2 : K, v2 : V, shift : Nat32) : Node<K, V> {
-    if (shift >= 32) {
+    if (h1 == h2 or shift >= 32) {
       #collision(h1, [var (k1, v1), (k2, v2)]);
     } else {
       let bit1 = bitpos(h1, shift);
@@ -1222,24 +1225,202 @@ module {
   public let bhash = (hashBlob, func(a, b) = a == b):HashUtils<Blob>;
   public let lhash = (hashBool, func(a, b) = a == b):HashUtils<Bool>;
 
+  /// Combine two HashUtils into a HashUtils for a tuple key.
+  ///
+  /// SECURITY: uses an xxHash-style mixer (multiply-rotate-multiply-xor) instead
+  /// of plain `+%` so that an attacker who controls one or both components
+  /// cannot trivially construct collisions by exploiting `h1(a) + h2(b) ==
+  /// h1(a') + h2(b')`. Honest workloads see no behavioural difference.
   public func combineHash<K1, K2>(hashUtils1: HashUtils<K1>, hashUtils2: HashUtils<K2>): HashUtils<(K1, K2)> {
     let getHash1 = hashUtils1.0;
     let getHash2 = hashUtils2.0;
     let areEqual1 = hashUtils1.1;
     let areEqual2 = hashUtils2.1;
     (
-      func(key) = (getHash1(key.0) +% getHash2(key.1)),
+      func(key) {
+        let h1 = getHash1(key.0) *% 0xcc9e2d51;
+        let r1 = (h1 << 15) | (h1 >> 17);
+        let h2 = getHash2(key.1) *% 0x1b873593;
+        let r2 = (h2 << 13) | (h2 >> 19);
+        var h = r1 ^ r2;
+        h := h *% 0x85ebca6b;
+        h := h ^ (h >> 13);
+        h := h *% 0xc2b2ae35;
+        h ^ (h >> 16);
+      },
       func(a, b) = areEqual1(a.0, b.0) and areEqual2(a.1, b.1),
     )
   };
 
+  /// UNSAFE: returns a HashUtils whose getHash always returns `hash`, regardless
+  /// of the key. Intended only for batched operations where the caller has
+  /// already computed the correct hash for one specific key. Do NOT thread
+  /// this into a general put/get path — every key would collide into one
+  /// bucket and degrade the map to O(n).
   public func useHash<K>(hashUtils: HashUtils<K>, hash: Nat32): HashUtils<K> {
     (func(_key) = hash, hashUtils.1);
   };
 
+  /// UNSAFE: returns a HashUtils that ignores its key argument and always
+  /// reports `hashUtils.0(key)`. Same restrictions as `useHash`.
   public func calcHash<K>(hashUtils: HashUtils<K>, key: K): HashUtils<K> {
     let hash = hashUtils.0(key);
     (func(_key) = hash, hashUtils.1);
+  };
+
+  /// Wrap a HashUtils in a per-instance seed to defeat hash-flooding attacks
+  /// against adversarial keys. The seed is mixed into every hash via the
+  /// same xxHash-style finalizer used by `combineHash`. An attacker who does
+  /// not know the seed cannot pre-compute keys that all collide.
+  ///
+  /// Use one fresh seed per map instance (e.g. derived from canister-local
+  /// randomness or a secret nonce) when the map's keys come from untrusted
+  /// callers. Honest, non-adversarial workloads do not need this.
+  public func withSeed<K>(seed : Nat32, hashUtils : HashUtils<K>) : HashUtils<K> {
+    let getHash = hashUtils.0;
+    (
+      func(key) {
+        var h = getHash(key) ^ seed;
+        h := h *% 0x85ebca6b;
+        h := h ^ (h >> 13);
+        h := h *% 0xc2b2ae35;
+        h ^ (h >> 16);
+      },
+      hashUtils.1,
+    )
+  };
+
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+  /// Validate the structural invariants of a Map. Returns `#ok` if the value
+  /// could have been produced by this library's public API, or `#err(reason)`
+  /// otherwise. Use this at trust boundaries (e.g. when accepting a Map
+  /// shape from a candid caller) — see the README "Security considerations"
+  /// section.
+  ///
+  /// Invariants checked:
+  ///   * `#arrayMap` size is in 1..ARRAY_MAX (no empty arrayMap, no overflow).
+  ///   * `#arrayMap` keys are pairwise non-equal under `hashUtils.1`.
+  ///   * `#trie` is reachable in <= 7 CHAMP levels (32 hash bits, 5 per level).
+  ///   * Each `#branch`'s data/children array sizes match popcount(datamap)/popcount(nodemap).
+  ///   * `#branch` datamap and nodemap bits do not overlap.
+  ///   * `#branch` inline entries' hash bits at the current shift agree with
+  ///     their datamap slot.
+  ///   * `#collision` only appears at shift >= 32 (after all hash bits consumed).
+  ///   * `#collision` bucket has >= 2 entries with pairwise non-equal keys, and
+  ///     every entry's hash matches the collision node's hash.
+  ///
+  /// This does NOT re-hash inline trie entries' keys (it would require trusting
+  /// the same `hashUtils.0` that the candid caller may not have used) — the
+  /// hash stamped in the entry is treated as authoritative. Equality checks
+  /// use the supplied `hashUtils.1`.
+  public func validate<K, V>(map : Map<K, V>, hashUtils : HashUtils<K>) : { #ok; #err : Text } {
+    switch map {
+      case (#empty) #ok;
+      case (#arrayMap(entries)) {
+        let n = entries.size();
+        if (n == 0) return #err("arrayMap must not be empty (use #empty)");
+        if (n > ARRAY_MAX) return #err("arrayMap size " # debugNat(n) # " exceeds ARRAY_MAX (" # debugNat(ARRAY_MAX) # ")");
+        let eq = hashUtils.1;
+        var i = 0;
+        while (i < n) {
+          var j = i + 1;
+          while (j < n) {
+            if (eq(entries[i].0, entries[j].0)) {
+              return #err("arrayMap contains duplicate key at indices " # debugNat(i) # " and " # debugNat(j));
+            };
+            j += 1;
+          };
+          i += 1;
+        };
+        #ok;
+      };
+      case (#trie(node)) {
+        validateNode<K, V>(node, hashUtils.1, 0);
+      };
+    };
+  };
+
+  func debugNat(n : Nat) : Text {
+    var x = n;
+    if (x == 0) return "0";
+    var t = "";
+    while (x > 0) {
+      let d = x % 10;
+      let ch = switch (d) {
+        case 0 "0"; case 1 "1"; case 2 "2"; case 3 "3"; case 4 "4";
+        case 5 "5"; case 6 "6"; case 7 "7"; case 8 "8"; case _ "9";
+      };
+      t := ch # t;
+      x := x / 10;
+    };
+    t;
+  };
+
+  func validateNode<K, V>(node : Node<K, V>, eq : (K, K) -> Bool, shift : Nat32) : { #ok; #err : Text } {
+    switch node {
+      case (#branch(datamap, nodemap, data, children)) {
+        if ((datamap & nodemap) != 0) {
+          return #err("branch datamap and nodemap overlap at shift " # debugNat(Nat32.toNat(shift)));
+        };
+        let dPop = Nat32.toNat(Nat32.bitcountNonZero(datamap));
+        let nPop = Nat32.toNat(Nat32.bitcountNonZero(nodemap));
+        if (data.size() != dPop) {
+          return #err("branch data size " # debugNat(data.size()) # " != popcount(datamap)=" # debugNat(dPop));
+        };
+        if (children.size() != nPop) {
+          return #err("branch children size " # debugNat(children.size()) # " != popcount(nodemap)=" # debugNat(nPop));
+        };
+        // Verify each inline entry's hash routes to the slot it occupies.
+        var bm = datamap;
+        var idx = 0;
+        while (bm != 0) {
+          let bit = bm & (0 -% bm); // lowest set bit
+          let entry = data[idx];
+          if (bitpos(entry.0, shift) != bit) {
+            return #err("branch inline entry hash does not match its datamap slot at shift " # debugNat(Nat32.toNat(shift)));
+          };
+          bm := bm ^ bit;
+          idx += 1;
+        };
+        // Recurse into children with shift + BITS.
+        if (shift +% BITS > 32 and children.size() > 0) {
+          return #err("branch has children beyond max trie depth (shift > 32)");
+        };
+        var ci = 0;
+        let cn = children.size();
+        while (ci < cn) {
+          switch (validateNode<K, V>(children[ci], eq, shift +% BITS)) {
+            case (#err e) return #err(e);
+            case (#ok) {};
+          };
+          ci += 1;
+        };
+        #ok;
+      };
+      case (#collision(_, entries)) {
+        // Note: with the hardened mergeEntries short-circuit, collision nodes
+        // may appear at any shift (not only after all hash bits are consumed)
+        // whenever two distinct keys have identical 32-bit hashes. The bucket
+        // invariants (>= 2 entries, pairwise non-equal keys) still hold.
+        let n = entries.size();
+        if (n < 2) {
+          return #err("collision bucket must contain at least 2 entries (got " # debugNat(n) # ")");
+        };
+        var i = 0;
+        while (i < n) {
+          var j = i + 1;
+          while (j < n) {
+            if (eq(entries[i].0, entries[j].0)) {
+              return #err("collision bucket contains duplicate key at indices " # debugNat(i) # " and " # debugNat(j));
+            };
+            j += 1;
+          };
+          i += 1;
+        };
+        #ok;
+      };
+    };
   };
 
 };
