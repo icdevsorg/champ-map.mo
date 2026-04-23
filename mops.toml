@@ -1,0 +1,15 @@
+[package]
+name = "champ-map"
+version = "0.1.0"
+description = "Persistent/functional CHAMP (Compressed Hash-Array Mapped Prefix-tree) map for Motoko"
+repository = ""https://github.com/icdevsorg/champ-map.mo
+license = "MIT"
+
+[dependencies]
+core = "2.3.1"
+
+[toolchain]
+moc = "1.4.1"
+
+[dev-dependencies]
+bench = "2.0.1"
