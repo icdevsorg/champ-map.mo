@@ -1,6 +1,8 @@
 # ChampMap
 
-A **persistent / functional** hash map for [Motoko](https://internetcomputer.org/docs/current/motoko/main/about-this-guide), built on the **CHAMP** (Compressed Hash-Array Mapped Prefix-tree) data structure.
+A **persistent / functional API** for hash maps in [Motoko](https://internetcomputer.org/docs/current/motoko/main/about-this-guide), built on the **CHAMP** (Compressed Hash-Array Mapped Prefix-tree) data structure.
+
+Persistence/immutability guarantees apply when the map is used through ChampMap's public functions such as `empty`, `put`, `get`, `remove`, `swap`, `entries`, and `clone`. The exported `Map<K, V>` representation is currently structural and contains mutable arrays internally, so callers should treat it as an opaque value and should not construct, destructure, or mutate raw map values directly.
 
 ## Funded by ICDevs.org
 
@@ -43,7 +45,7 @@ For well-distributed hashes (the built-in `HashUtils` for `Nat`, `Text`, `Blob`,
 
 | Feature | Detail |
 |---------|--------|
-| **Persistent / immutable** | Every mutation returns a *new* map; the old version is unchanged. Safe for rollback-friendly canister state. |
+| **Persistent / immutable when used via API** | Every mutation returns a *new* map; the old version is unchanged when you use ChampMap's public functions and treat `Map<K, V>` as opaque. |
 | **O(1) clone** | `clone` returns the same structural reference — free snapshots. |
 | **Hash-based O(1) average lookup** | Path-copying CHAMP trie with 32-way branching at each level. |
 | **Small-map fast-path** | Maps with ≤ 16 entries use a flat array (no hashing overhead). |
@@ -57,6 +59,8 @@ mops add champ-map
 ```
 
 ## Quick start
+
+Use the public functions and treat `Map<K, V>` values as opaque snapshots. Do not pattern-match on `#arrayMap` / `#trie` or mutate the backing arrays directly.
 
 ```motoko
 import CM "mo:champ-map";
@@ -82,6 +86,8 @@ assert CM.size(snapshot) == 2; // unchanged
 ## API reference
 
 ### Types
+
+`Map<K, V>` is shown below so the API surface is explicit, but normal consumers should treat it as a raw/internal representation detail and should not construct or mutate it directly.
 
 ```motoko
 type HashUtils<K> = (getHash : (K) -> Nat32, areEqual : (K, K) -> Bool);
@@ -214,7 +220,7 @@ ChampMap is **not safe by default against adversarial keys**. If your keys come 
 |--------|------------|
 | **Hash-flooding** — attacker submits keys with the same `Nat32` hash, forcing all entries into one `#collision` bucket. | Wrap your `HashUtils` with `withSeed<K>(seed, hashUtils)` and pick a fresh per-instance `seed` (canister-local randomness, secret nonce, etc.) so the attacker cannot pre-compute collisions. Honest workloads pay nothing. |
 | **Composite-key collisions via `combineHash`** — the previous `+%` combiner allowed `(a,b)` and `(b,a)` to share a hash trivially. | Already fixed: `combineHash` uses an xxHash-style mixer (multiply‐rotate‐multiply‐xor). Combine with `withSeed` if either component is attacker-controlled. |
-| **Malformed `Map<K, V>` shape** — because `Map<K, V>` is a public structural type, a candid caller can synthesise a `#arrayMap` with > 16 entries, duplicate keys, or a `#branch` whose bitmaps disagree with its arrays. Such values will misbehave or trap on subsequent operations. | **Never accept `Map<K, V>` directly across a trust boundary.** Round-trip via `[(K, V)]` + `fromIter`. If you must accept it, call `validate(map, hashUtils)` first and reject `#err`. |
+| **Malformed or directly-mutated `Map<K, V>` shape** — because `Map<K, V>` is a public structural type, a candid caller can synthesise a `#arrayMap` with > 16 entries, duplicate keys, or a `#branch` whose bitmaps disagree with its arrays, and in-process code can also violate persistence guarantees by mutating raw `[var]` arrays after destructuring. Such values can misbehave or trap on subsequent operations. | **Treat `Map<K, V>` as opaque and never accept or mutate it directly across a trust boundary.** Round-trip via `[(K, V)]` + `fromIter`. If you must accept it, call `validate(map, hashUtils)` first and reject `#err`. |
 | **`useHash` / `calcHash` misuse** — these helpers return a `HashUtils` whose `getHash` ignores its key argument. Threading one into a general put/get path collapses every key into one bucket. | These are intended only for short, batched operations where the caller has already computed the hash for one specific key. Never store one as the canonical `HashUtils` for a map. |
 | **Unbounded mass operations** — `fromIter`, `forEach`, `filter`, `mapFilter`, `map_`, `equal` iterate without a cycle ceiling. Untrusted iterators can blow the per-message instruction budget. | Use `entries` + `collectBatch` to chunk processing. The header comment in `lib.mo` documents safe size estimates per operation. |
 
@@ -244,46 +250,75 @@ public func acceptMap(m : CM.Map<Principal, Nat>) : async {#ok; #err : Text} {
 
 ## Benchmarks
 
-Measured with `mops bench --replica pocket-ic` comparing **ChampMap** (CHAMP trie) vs **`mo:core/pure/Map`** (red-black tree). Maps are pre-built; each cell measures *only* the operation (except `build` which constructs from scratch).
+Measured with `mops bench --replica pocket-ic`.
 
-### Instructions
+- `bench/champ.bench.mo` compares **ChampMap** (CHAMP trie), **`mo:hamt/pure/HashMap`**, and **`mo:core/pure/Map`** on `Nat` keys.
+- `bench/key_types.bench.mo` compares **ChampMap** and **`mo:hamt/pure/HashMap`** on `Text` and `Blob` keys.
+- Maps are pre-built; each cell measures *only* the operation, except `build`.
 
-|         |  CM 10 |  CM 100 |  CM 1_000 |  CM 10_000 |  CM 100_000 | Core 10 | Core 100 | Core 1_000 | Core 10_000 | Core 100_000 |
-| :------ | -----: | ------: | --------: | ---------: | ----------: | ------: | -------: | ---------: | ----------: | -----------: |
-| build   | 16_810 | 304_581 | 4_893_243 | 70_279_391 | 895_007_083 |  21_993 |  252_138 |  3_668_998 |  48_896_255 |  614_443_107 |
-| get     | 11_854 |  68_927 |   728_112 |  8_193_022 |  94_537_253 |  13_662 |   82_978 |  1_097_791 |  13_959_723 |  171_067_014 |
-| replace | 21_677 | 374_501 | 5_197_306 | 77_182_490 | 986_744_481 |  21_622 |  198_699 |  2_727_884 |  34_556_080 |  421_502_132 |
-| delete  | 15_735 | 324_469 | 5_278_537 | 75_055_566 | 955_605_822 |  20_660 |  210_178 |  2_952_069 |  39_215_315 |  498_707_689 |
-| clone   |  6_056 |   8_001 |     8_658 |      7_372 |       5_840 |   9_573 |   10_625 |     10_082 |       8_384 |        6_419 |
-| iterate |  7_760 |  43_354 |   336_760 |  3_012_785 |  32_653_668 |  17_458 |   85_957 |    760_337 |   7_509_307 |   75_013_644 |
+### Nat keys: instructions
 
-### Garbage collection (allocation pressure)
+|         |  CM 10 |  CM 16 |  CM 100 |  CM 1_000 |  CM 10_000 |  CM 100_000 | HAMT 10 | HAMT 16 | HAMT 100 | HAMT 1_000 | HAMT 10_000 |  HAMT 100_000 | Core 10 | Core 16 | Core 100 | Core 1_000 | Core 10_000 | Core 100_000 |
+| :------ | -----: | -----: | ------: | --------: | ---------: | ----------: | ------: | ------: | -------: | ---------: | ----------: | ------------: | ------: | ------: | -------: | ---------: | ----------: | -----------: |
+| build   | 20_141 | 34_452 | 305_582 | 4_894_162 | 70_280_392 | 895_007_469 |  35_526 |  54_502 |  551_466 |  8_706_450 | 125_208_922 | 1_569_449_661 |  25_727 |  36_845 |  253_224 |  3_669_920 |  48_897_464 |  614_445_464 |
+| get     | 15_185 | 22_578 |  70_010 |   729_195 |  8_194_105 |  94_538_295 |  25_129 |  32_737 |  161_081 |  1_726_014 |  19_974_409 |   213_567_590 |  17_396 |  20_352 |   84_064 |  1_098_877 |  13_960_809 |  171_068_100 |
+| replace | 25_008 | 46_123 | 375_543 | 5_198_307 | 77_183_573 | 986_745_810 |  42_992 |  69_322 |  776_179 | 10_069_447 | 147_874_471 | 1_718_983_405 |  25_356 |  33_704 |  199_785 |  2_728_970 |  34_557_125 |  421_503_259 |
+| delete  | 19_066 | 30_194 | 325_552 | 5_279_579 | 75_056_403 | 955_608_135 |  39_288 |  59_747 |  564_434 |  9_160_049 | 130_545_278 | 1_628_971_192 |  24_394 |  33_155 |  211_264 |  2_953_196 |  39_215_991 |  498_707_709 |
+| clone   |  9_387 |  9_175 |   9_084 |     9_741 |      8_455 |       6_923 |  13_691 |  13_479 |   12_095 |     11_552 |       9_854 |         7_889 |  13_307 |  13_095 |   11_711 |     11_168 |       9_470 |        7_505 |
+| iterate | 11_091 | 11_683 |  44_437 |   337_843 |  3_013_868 |  32_654_710 |  25_387 |  32_618 |  153_538 |  1_263_021 |  14_311_550 |   127_609_045 |  21_192 |  25_533 |   87_043 |    761_423 |   7_510_393 |   75_014_689 |
 
-|         |    CM 10 |    CM 100 |   CM 1_000 |  CM 10_000 | CM 100_000 |  Core 10 |  Core 100 | Core 1_000 | Core 10_000 | Core 100_000 |
-| :------ | -------: | --------: | ---------: | ---------: | ---------: | -------: | --------: | ---------: | ----------: | -----------: |
-| build   | 1.61 KiB | 22.16 KiB |  319.6 KiB |   4.22 MiB |   52.7 MiB |  4.9 KiB | 55.14 KiB | 763.37 KiB |    9.65 MiB |   118.76 MiB |
-| get     | 1.04 KiB |  2.16 KiB |  11.08 KiB |  95.78 KiB |  984.2 KiB | 1.75 KiB |  1.61 KiB |   1.32 KiB |    1.04 KiB |        772 B |
-| replace | 1.78 KiB | 25.71 KiB | 332.04 KiB |   4.52 MiB |  56.71 MiB | 4.39 KiB | 41.93 KiB | 573.46 KiB |    7.26 MiB |    88.29 MiB |
-| delete  | 1.55 KiB | 22.81 KiB | 336.38 KiB |   4.52 MiB |  56.58 MiB | 4.51 KiB | 54.41 KiB | 799.52 KiB |   10.52 MiB |   134.95 MiB |
-| clone   | 1.04 KiB |  1.19 KiB |   1.19 KiB |      924 B |      632 B | 1.75 KiB |  1.61 KiB |   1.32 KiB |    1.04 KiB |        772 B |
-| iterate | 1.09 KiB |  3.69 KiB |  17.75 KiB | 158.09 KiB |   1.53 MiB | 2.79 KiB | 11.45 KiB |  99.05 KiB |  977.67 KiB |     9.54 MiB |
+### Nat keys: garbage collection
+
+|         |    CM 10 |    CM 16 |    CM 100 |   CM 1_000 |  CM 10_000 | CM 100_000 |  HAMT 10 |  HAMT 16 |  HAMT 100 | HAMT 1_000 | HAMT 10_000 | HAMT 100_000 |  Core 10 |  Core 16 |  Core 100 | Core 1_000 | Core 10_000 | Core 100_000 |
+| :------ | -------: | -------: | --------: | ---------: | ---------: | ---------: | -------: | -------: | --------: | ---------: | ----------: | -----------: | -------: | -------: | --------: | ---------: | ----------: | -----------: |
+| build   | 2.18 KiB | 2.57 KiB | 22.45 KiB | 319.89 KiB |   4.22 MiB |   52.7 MiB | 4.88 KiB | 6.61 KiB | 43.75 KiB | 610.26 KiB |    7.85 MiB |    95.04 MiB | 5.47 KiB |    8 KiB | 55.42 KiB | 763.66 KiB |    9.65 MiB |   118.76 MiB |
+| get     | 1.61 KiB | 1.47 KiB |  2.44 KiB |  11.36 KiB |  96.06 KiB | 984.48 KiB | 2.96 KiB | 3.34 KiB | 11.87 KiB | 117.34 KiB |    1.32 MiB |    14.14 MiB | 2.32 KiB | 2.18 KiB |  1.89 KiB |   1.61 KiB |    1.32 KiB |     1.04 KiB |
+| replace | 2.35 KiB | 3.04 KiB |    26 KiB | 332.32 KiB |   4.52 MiB |  56.72 MiB | 5.38 KiB | 7.67 KiB | 58.68 KiB | 705.27 KiB |    9.28 MiB |   105.18 MiB | 4.96 KiB |  6.8 KiB | 42.21 KiB | 573.75 KiB |    7.26 MiB |    88.29 MiB |
+| delete  | 2.12 KiB | 2.48 KiB |  23.1 KiB | 336.67 KiB |   4.52 MiB |  56.58 MiB | 4.77 KiB | 6.47 KiB | 43.17 KiB | 633.54 KiB |    8.21 MiB |   100.69 MiB | 5.08 KiB | 7.21 KiB |  54.7 KiB |  799.8 KiB |   10.52 MiB |   134.95 MiB |
+| clone   | 1.61 KiB | 1.47 KiB |  1.47 KiB |   1.47 KiB |   1.19 KiB |      924 B | 2.18 KiB | 2.04 KiB |  1.76 KiB |   1.47 KiB |    1.19 KiB |        924 B | 2.32 KiB | 2.18 KiB |  1.89 KiB |   1.61 KiB |    1.32 KiB |     1.04 KiB |
+| iterate | 1.66 KiB | 1.52 KiB |  3.97 KiB |  18.04 KiB | 158.38 KiB |   1.53 MiB | 2.98 KiB | 3.26 KiB |  9.43 KiB |  71.63 KiB |  760.94 KiB |     6.92 MiB | 3.36 KiB | 3.81 KiB | 11.73 KiB |  99.34 KiB |  977.96 KiB |     9.54 MiB |
+
+### Text and Blob keys: instruction checkpoints
+
+To keep the README readable, the full `Text`/`Blob` benchmark matrix is summarized at the fast-path boundary (`16`) and at scale (`100_000`). The raw full table is emitted by `bench/key_types.bench.mo`.
+
+|         | CM/Text 16 | HAMT/Text 16 | CM/Text 100_000 | HAMT/Text 100_000 | CM/Blob 16 | HAMT/Blob 16 | CM/Blob 100_000 | HAMT/Blob 100_000 |
+| :------ | ---------: | -----------: | --------------: | ----------------: | ---------: | -----------: | --------------: | ----------------: |
+| build   |     90_398 |      104_501 |     945_380_520 |     1_697_594_205 |     74_795 |      104_107 |     909_562_716 |     1_660_895_318 |
+| get     |     82_166 |       90_534 |     203_734_395 |       394_605_334 |     65_317 |       88_894 |     138_880_954 |       328_852_010 |
+| replace |    105_679 |      126_495 |   1_066_883_571 |     1_899_755_436 |     88_830 |      124_855 |   1_002_030_335 |     1_834_003_629 |
+| delete  |     66_625 |      114_927 |   1_039_892_322 |     1_810_466_593 |     65_391 |      113_287 |     975_040_275 |     1_744_713_433 |
+| clone   |     41_916 |       51_773 |          42_590 |            50_983 |     41_928 |       51_779 |          42_602 |            50_989 |
+| iterate |     44_430 |       72_570 |      29_836_181 |       129_675_591 |     44_442 |       72_576 |      29_836_193 |       129_675_597 |
+
+### Text and Blob keys: GC checkpoints
+
+|         | CM/Text 16 | HAMT/Text 16 | CM/Text 100_000 | HAMT/Text 100_000 | CM/Blob 16 | HAMT/Blob 16 | CM/Blob 100_000 | HAMT/Blob 100_000 |
+| :------ | ---------: | -----------: | --------------: | ----------------: | ---------: | -----------: | --------------: | ----------------: |
+| build   |    6.8 KiB |    11.32 KiB |       53.78 MiB |         96.79 MiB |    6.8 KiB |    11.32 KiB |       52.06 MiB |         95.07 MiB |
+| get     |    5.7 KiB |     8.18 KiB |        2.67 MiB |         15.87 MiB |    5.7 KiB |     8.18 KiB |       979.2 KiB |         14.15 MiB |
+| replace |   7.27 KiB |    12.59 KiB |       56.81 MiB |          106.9 MiB |   7.27 KiB |    12.59 KiB |        55.1 MiB |        105.19 MiB |
+| delete  |   6.71 KiB |    11.19 KiB |       57.16 MiB |        102.44 MiB |   6.71 KiB |    11.19 KiB |       55.44 MiB |        100.72 MiB |
+| clone   |    5.7 KiB |     6.64 KiB |        5.73 KiB |          6.67 KiB |    5.7 KiB |     6.64 KiB |        5.73 KiB |          6.67 KiB |
+| iterate |   5.75 KiB |      7.9 KiB |        1.53 MiB |          6.92 MiB |   5.75 KiB |      7.9 KiB |        1.53 MiB |          6.92 MiB |
 
 ### Key takeaways
 
-- **Get** is **19 %** faster at 100 keys, **42 %** at 10K, **46 %** at 100K (hash lookup vs tree traversal).
-- **Iterate** is **2× faster** across all sizes — flat arrays and compact nodes are cache-friendly.
-- **Clone** is free for both (persistent structure), but ChampMap's literal identity copy is marginally cheaper.
-- **Build / replace / delete** use fewer GC bytes at all sizes (CHAMP nodes are smaller than RB-tree nodes).
-- **`core/pure/Map`** wins on **build** and **replace** at the instruction level because RB-tree rotations are simpler than CHAMP array copying — a classic space-vs-time trade-off.
+- **The `16`-entry fast path is visible.** At 16 `Nat` keys, ChampMap beats HAMT on every operation and also beats `core/pure/Map` on `build`, `delete`, `clone`, and `iterate`; `core/pure/Map` still edges it on `get` and `replace`.
+- **ChampMap consistently beats `hamt/pure/HashMap` in this harness.** That holds for `Nat`, `Text`, and `Blob` keys, at both small and large sizes, on instructions and GC.
+- **Read-heavy and iteration-heavy workloads still favor ChampMap.** At 100K `Nat` keys, `get` is ~1.83× faster than HAMT and ~1.81× faster than `core/pure/Map`, while `iterate` is ~3.9× faster than HAMT and ~2.3× faster than `core/pure/Map`.
+- **Text and Blob keys amplify the gap versus HAMT.** At 100K keys, ChampMap iteration is ~4.35× faster for `Text` and ~4.35× faster for `Blob`; GC on `get` is dramatically lower as well.
+- **`core/pure/Map` still has the cheapest writes among the persistent structures.** On `Nat` keys it wins `build` and `replace` at the instruction level, but pays for that with ordered-tree traversal and higher mutation GC than ChampMap at scale.
 
 ### When to use which
 
 | Use case | Recommendation |
 |----------|----------------|
-| Read-heavy workloads (state lookups) | **ChampMap** — hash-based O(1) beats O(log n) |
-| Write-heavy with small maps (< 1K) | Either — difference is negligible |
-| Frequent snapshots / rollback | **ChampMap** — O(1) clone, lower GC on mutations |
+| Read-heavy workloads (state lookups) | **ChampMap** — it wins across `Nat`, `Text`, and `Blob` lookups in this harness |
+| Small hot maps around the fast-path cutoff | **ChampMap** — the `16`-entry array fast path is visible in the measurements |
+| Frequent snapshots / rollback | **ChampMap** — O(1) clone and lower mutation GC than HAMT |
 | Ordered iteration needed | `core/pure/Map` — maintains key order |
+| Cheapest persistent write path on `Nat` keys | `core/pure/Map` — lower `build`/`replace` instructions than the hash maps |
 
 ### Reproducing
 

@@ -1,8 +1,10 @@
 {
   "version": 3,
-  "mopsTomlDepsHash": "04f9bfaacf8d19aa2cbc1fb36ee21dc8bd17638a72e433d187710efd85ee53e9",
+  "mopsTomlDepsHash": "cf5210547b7e24d075dee8af7bdf0f05ff1b64b518bc3c90c0e0832f6c3e9fff",
   "deps": {
     "core": "2.3.1",
+    "hamt": "2.0.0",
+    "siphash": "1.0.3",
     "bench": "2.0.1"
   },
   "hashes": {
@@ -62,6 +64,24 @@
       "core@2.3.1/src/internal/PRNG.mo": "8a93e87baa2b12f613c82394a4a05b425e44a695bbace4ca36f9a1f78be26442",
       "core@2.3.1/src/pure/List.mo": "b4fb45cf75410461fb1501a316d2384d1be63fee1fccf11ed1d29677e5e2393c",
       "core@2.3.1/src/pure/RealTimeQueue.mo": "af133ae61c69ce4e00db5e9db53ddeccad84373fef82a156c85360c2426349dd"
+    },
+    "hamt@2.0.0": {
+      "hamt@2.0.0/mops.toml": "fbd273312930ed84c3c0cc78f1ca2082d6304b8b4d6c327c07c2581dc077850d",
+      "hamt@2.0.0/src/Utils.mo": "debc6e3ee9750ea9af03f924cfe91d05768d06ef08f67044bd02b81cbd5b79e0",
+      "hamt@2.0.0/LICENSE": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+      "hamt@2.0.0/src/HashMap.mo": "f45c61de23619554fcecd00a44800c8c610efd362ef601095396d4939147cbbc",
+      "hamt@2.0.0/README.md": "23160ecda08983b275616afa9cd4c30f97c8abb6fb123d6fef7c4f287a88314c",
+      "hamt@2.0.0/src/Types.mo": "973ef5b1a64d31fb2e7b331d29601fb3d1fe3e1d5ec40c76de01a9ae965c5587",
+      "hamt@2.0.0/src/Hamt.mo": "241181326998acf3e4ebfaad1fa65a0795212f47633f90a2d44bc2ff77339464",
+      "hamt@2.0.0/src/pure/Hamt.mo": "387e44d8a8700fd904f2bff2fb9b7821e2e482a87de6e6fb05daabba34e7a608",
+      "hamt@2.0.0/src/pure/HashMap.mo": "41595ee09470c0aa9437d372535d1c2833930392c84ee09958062e54fe184c39"
+    },
+    "siphash@1.0.3": {
+      "siphash@1.0.3/src/Sip13.mo": "5408a0fe39cf011aef7d725c9a94116e58b89f884054c955207976dc127f1884",
+      "siphash@1.0.3/src/Hasher.mo": "ce6cbf96dd487d944c22efac0c36d6e03cd7341fae2f7df4fb2991e418a3318c",
+      "siphash@1.0.3/LICENSE": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+      "siphash@1.0.3/mops.toml": "5b619b3a025900108d964abb4d32973a0bee61db9bdd8ce6ad87f3e832ba5956",
+      "siphash@1.0.3/README.md": "deb1be194e6957ed0af074c901d190edf000c952df1af887dd4ef04004c08ee1"
     },
     "bench@2.0.1": {
       "bench@2.0.1/mops.toml": "d15a6e1e7a65c8e857c2026f1d08871cae837ae32d19ebd1575678c91cf7b32f",
