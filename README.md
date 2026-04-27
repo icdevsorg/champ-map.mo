@@ -335,6 +335,10 @@ mops bench --replica pocket-ic
 $(dfx cache show)/moc -r test/ChampMap.mo $(mops sources)
 ```
 
+## AI coding-agent skill
+
+This repo includes an AI coding-agent skill at `skills/champ-map/SKILL.md`. Point your agent at that file to help it write correct ChampMap code in your project.
+
 ## License
 
 MIT
